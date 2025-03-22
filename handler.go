@@ -107,10 +107,14 @@ func (h *Handler) worker() {
 	for {
 		select {
 		case <-h.stop:
+			h.mu.Lock()
 			h.flush()
+			h.mu.Unlock()
 			return
 		case <-ticker.C:
+			h.mu.Lock()
 			h.flush()
+			h.mu.Unlock()
 		}
 	}
 }
