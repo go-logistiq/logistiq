@@ -38,7 +38,17 @@ type Options struct {
 }
 
 func New(opts Options) (*Handler, error) {
-	natsConn, err := nats.Connect(opts.NATSURL)
+	natsConn, err := nats.Connect(opts.NATSURL,
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(5*time.Second),
+		nats.ReconnectBufSize(32*1024*1024),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			slog.Warn("NATS disconnected", "error", err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			slog.Info("NATS reconnected", "url", nc.ConnectedUrl())
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +72,10 @@ func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
 
 func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 	h.mutex.Lock()
+	if len(h.queue) >= 1000 {
+		slog.Warn("Queue full, dropping oldest log")
+		h.queue = h.queue[1:]
+	}
 	h.queue = append(h.queue, r)
 	shouldFlush := len(h.queue) >= h.batchSize
 	h.mutex.Unlock()
@@ -87,7 +101,6 @@ func (h *Handler) flush() {
 		return
 	}
 	records := h.queue
-	h.queue = make([]slog.Record, 0, h.batchSize)
 	h.mutex.Unlock()
 
 	entries := make([]logRecord, len(records))
@@ -107,12 +120,18 @@ func (h *Handler) flush() {
 
 	data, err := json.Marshal(entries)
 	if err != nil {
+		slog.Error("Failed to marshal logs", "error", err)
 		return
 	}
 
-	go func() {
-		h.natsConn.Publish(h.subject, data)
-	}()
+	if err := h.natsConn.Publish(h.subject, data); err != nil {
+		slog.Warn("Failed to publish to NATS, retaining logs", "error", err)
+		return
+	}
+
+	h.mutex.Lock()
+	h.queue = make([]slog.Record, 0, h.batchSize)
+	h.mutex.Unlock()
 }
 
 func (h *Handler) worker() {
@@ -134,7 +153,10 @@ func (h *Handler) worker() {
 func (h *Handler) Close() error {
 	close(h.stop)
 	h.waitGroup.Wait()
-	h.natsConn.Flush()
+	h.flush()
+	if err := h.natsConn.FlushTimeout(10 * time.Second); err != nil {
+		slog.Warn("Failed to flush NATS buffer on close", "error", err)
+	}
 	h.natsConn.Close()
 	return nil
 }
