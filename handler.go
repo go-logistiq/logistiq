@@ -68,7 +68,7 @@ func New(opts Options) (*Handler, error) {
 		timeout:    opts.Timeout,
 		subject:    opts.Subject,
 		natsConn:   natsConn,
-		stop:       make(chan struct{}),
+		stop:       make(chan struct{}, 1),
 		notifyWork: make(chan struct{}, 1),
 	}
 
@@ -84,23 +84,20 @@ func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
 
 func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 	h.mutex.Lock()
-
 	if len(h.queue) >= 1000 {
 		slog.Warn("Queue full, dropping oldest log")
 		h.queue = h.queue[1:]
 	}
-
 	h.queue = append(h.queue, r)
-
 	shouldNotify := len(h.queue) >= h.batchSize
+	h.mutex.Unlock()
+
 	if shouldNotify {
 		select {
 		case h.notifyWork <- struct{}{}:
 		default:
 		}
 	}
-
-	h.mutex.Unlock()
 
 	return nil
 }
