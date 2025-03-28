@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	natsURL     = "nats://10.172.0.1:4222"
+	natsURL     = "nats://10.172.0.1:4223"
 	testSubject = "logs.test.app1"
 )
 
