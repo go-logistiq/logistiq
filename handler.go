@@ -12,7 +12,7 @@ import (
 
 type logRecord struct {
 	Level      int            `json:"level"`
-	Time       time.Time      `json:"time"`
+	LoggedAt   time.Time      `json:"loggedAt"`
 	Message    string         `json:"message"`
 	Attributes map[string]any `json:"attributes"`
 }
@@ -134,7 +134,7 @@ func (h *Handler) flush() {
 		})
 		entries[i] = logRecord{
 			Level:      int(r.Level),
-			Time:       r.Time,
+			LoggedAt:   r.Time,
 			Message:    r.Message,
 			Attributes: attrs,
 		}
