@@ -71,6 +71,7 @@ func New(opts Options) (*Handler, error) {
 		stop:       make(chan struct{}, 1),
 		notifyWork: make(chan struct{}, 1),
 	}
+	slog.Info("NATS logger successfully initialized", "subject", opts.Subject)
 
 	h.waitGroup.Add(1)
 	go h.worker()
