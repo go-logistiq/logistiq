@@ -25,40 +25,29 @@ type Handler struct {
 	timeout    time.Duration
 	subject    string
 	natsConn   *nats.Conn
+	natsURL    string
 	stop       chan struct{}
 	notifyWork chan struct{}
 	waitGroup  sync.WaitGroup
+	setHandler func(slog.Handler)
+	closed     bool
 }
 
 type Options struct {
-	Level     slog.Level
-	BatchSize int
-	Timeout   time.Duration
-	NATSURL   string
-	Subject   string
+	Level      slog.Level
+	BatchSize  int
+	Timeout    time.Duration
+	NATSURL    string
+	Subject    string
+	SetHandler func(slog.Handler)
 }
 
-func New(opts Options) (*Handler, error) {
+func New(opts Options) *Handler {
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 100
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 5 * time.Second
-	}
-
-	natsConn, err := nats.Connect(opts.NATSURL,
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(5*time.Second),
-		nats.ReconnectBufSize(32*1024*1024),
-		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
-			slog.Warn("NATS disconnected", "error", err)
-		}),
-		nats.ReconnectHandler(func(nc *nats.Conn) {
-			slog.Info("NATS reconnected", "url", nc.ConnectedUrl())
-		}),
-	)
-	if err != nil {
-		return nil, err
 	}
 
 	h := &Handler{
@@ -67,16 +56,19 @@ func New(opts Options) (*Handler, error) {
 		batchSize:  opts.BatchSize,
 		timeout:    opts.Timeout,
 		subject:    opts.Subject,
-		natsConn:   natsConn,
+		natsURL:    opts.NATSURL,
 		stop:       make(chan struct{}, 1),
 		notifyWork: make(chan struct{}, 1),
+		setHandler: opts.SetHandler,
 	}
-	slog.Info("NATS logger successfully initialized", "subject", opts.Subject)
+
+	h.waitGroup.Add(1)
+	go h.startConnection()
 
 	h.waitGroup.Add(1)
 	go h.worker()
 
-	return h, nil
+	return h
 }
 
 func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
@@ -122,10 +114,6 @@ func (h *Handler) flush() {
 	h.queue = make([]slog.Record, 0, h.batchSize)
 	h.mutex.Unlock()
 
-	if len(recordsToFlush) == 0 {
-		return
-	}
-
 	entries := make([]logRecord, len(recordsToFlush))
 	for i, r := range recordsToFlush {
 		attrs := make(map[string]any)
@@ -147,9 +135,57 @@ func (h *Handler) flush() {
 		return
 	}
 
-	if err := h.natsConn.Publish(h.subject, data); err != nil {
-		slog.Warn("Failed to publish to NATS, retaining logs", "error", err)
-		return
+	if h.natsConn != nil {
+		if err := h.natsConn.Publish(h.subject, data); err != nil {
+			slog.Warn("Failed to publish to NATS, relying on internal queuing", "error", err)
+		}
+	}
+}
+
+func (h *Handler) connect() error {
+	natsConn, err := nats.Connect(h.natsURL,
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(5*time.Second),
+		nats.ReconnectBufSize(32*1024*1024),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			slog.Warn("NATS disconnected", "error", err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			slog.Info("NATS reconnected", "url", nc.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			slog.Warn("NATS connection closed")
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	h.mutex.Lock()
+	h.natsConn = natsConn
+	h.mutex.Unlock()
+
+	if h.setHandler != nil {
+		h.setHandler(h)
+	}
+
+	return nil
+}
+
+func (h *Handler) startConnection() {
+	defer h.waitGroup.Done()
+
+	for {
+		if err := h.connect(); err != nil {
+			slog.Warn("NATS connection attempt failed, retrying", "error", err)
+			select {
+			case <-h.stop:
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		break
 	}
 }
 
@@ -172,14 +208,26 @@ func (h *Handler) worker() {
 }
 
 func (h *Handler) Close() error {
+	h.mutex.Lock()
+	if h.closed {
+		h.mutex.Unlock()
+		return nil
+	}
+	h.closed = true
+	h.mutex.Unlock()
+
 	close(h.stop)
 	h.waitGroup.Wait()
 
-	flushErr := h.natsConn.FlushTimeout(10 * time.Second)
-	if flushErr != nil {
-		slog.Warn("Failed to flush NATS buffer on close", "error", flushErr)
+	if h.natsConn != nil {
+		flushErr := h.natsConn.FlushTimeout(10 * time.Second)
+		h.natsConn.Close()
+		h.natsConn = nil
+		if flushErr != nil {
+			slog.Warn("Failed to flush NATS buffer on close", "error", flushErr)
+			return flushErr
+		}
 	}
-	h.natsConn.Close()
 
-	return flushErr
+	return nil
 }
