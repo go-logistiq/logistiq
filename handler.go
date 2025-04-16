@@ -62,6 +62,10 @@ func New(opts Options) *Handler {
 		setHandler: opts.SetHandler,
 	}
 
+	if h.setHandler != nil {
+		h.setHandler(h)
+	}
+
 	h.waitGroup.Add(1)
 	go h.startConnection()
 
@@ -164,10 +168,6 @@ func (h *Handler) connect() error {
 	h.mutex.Lock()
 	h.natsConn = natsConn
 	h.mutex.Unlock()
-
-	if h.setHandler != nil {
-		h.setHandler(h)
-	}
 
 	return nil
 }
