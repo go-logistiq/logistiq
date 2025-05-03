@@ -17,7 +17,8 @@ type logRecord struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-type Handler struct {
+type Logistiq struct {
+	Handler    slog.Handler
 	level      slog.Level
 	queue      []slog.Record
 	mutex      sync.Mutex
@@ -29,20 +30,18 @@ type Handler struct {
 	stop       chan struct{}
 	notifyWork chan struct{}
 	waitGroup  sync.WaitGroup
-	setHandler func(slog.Handler)
 	closed     bool
 }
 
 type Options struct {
-	Level      slog.Level
-	BatchSize  int
-	Timeout    time.Duration
-	NATSURL    string
-	Subject    string
-	SetHandler func(slog.Handler)
+	Level     slog.Level
+	BatchSize int
+	Timeout   time.Duration
+	NATSURL   string
+	Subject   string
 }
 
-func New(opts Options) *Handler {
+func New(opts Options) (*Logistiq, error) {
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 100
 	}
@@ -50,7 +49,7 @@ func New(opts Options) *Handler {
 		opts.Timeout = 5 * time.Second
 	}
 
-	h := &Handler{
+	l := &Logistiq{
 		level:      opts.Level,
 		queue:      make([]slog.Record, 0, opts.BatchSize),
 		batchSize:  opts.BatchSize,
@@ -59,39 +58,36 @@ func New(opts Options) *Handler {
 		natsURL:    opts.NATSURL,
 		stop:       make(chan struct{}, 1),
 		notifyWork: make(chan struct{}, 1),
-		setHandler: opts.SetHandler,
 	}
 
-	if h.setHandler != nil {
-		h.setHandler(h)
-	}
+	l.Handler = l
 
-	h.waitGroup.Add(1)
-	go h.startConnection()
+	l.waitGroup.Add(1)
+	go l.startConnection()
 
-	h.waitGroup.Add(1)
-	go h.worker()
+	l.waitGroup.Add(1)
+	go l.worker()
 
-	return h
+	return l, nil
 }
 
-func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= h.level
+func (l *Logistiq) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= l.level
 }
 
-func (h *Handler) Handle(_ context.Context, r slog.Record) error {
-	h.mutex.Lock()
-	if len(h.queue) >= 1000 {
+func (l *Logistiq) Handle(_ context.Context, r slog.Record) error {
+	l.mutex.Lock()
+	if len(l.queue) >= 1000 {
 		slog.Warn("Queue full, dropping oldest log")
-		h.queue = h.queue[1:]
+		l.queue = l.queue[1:]
 	}
-	h.queue = append(h.queue, r)
-	shouldNotify := len(h.queue) >= h.batchSize
-	h.mutex.Unlock()
+	l.queue = append(l.queue, r)
+	shouldNotify := len(l.queue) >= l.batchSize
+	l.mutex.Unlock()
 
 	if shouldNotify {
 		select {
-		case h.notifyWork <- struct{}{}:
+		case l.notifyWork <- struct{}{}:
 		default:
 		}
 	}
@@ -99,24 +95,24 @@ func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+func (l *Logistiq) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return l
 }
 
-func (h *Handler) WithGroup(name string) slog.Handler {
-	return h
+func (l *Logistiq) WithGroup(name string) slog.Handler {
+	return l
 }
 
-func (h *Handler) flush() {
-	h.mutex.Lock()
-	if len(h.queue) == 0 {
-		h.mutex.Unlock()
+func (l *Logistiq) flush() {
+	l.mutex.Lock()
+	if len(l.queue) == 0 {
+		l.mutex.Unlock()
 		return
 	}
 
-	recordsToFlush := h.queue
-	h.queue = make([]slog.Record, 0, h.batchSize)
-	h.mutex.Unlock()
+	recordsToFlush := l.queue
+	l.queue = make([]slog.Record, 0, l.batchSize)
+	l.mutex.Unlock()
 
 	entries := make([]logRecord, len(recordsToFlush))
 	for i, r := range recordsToFlush {
@@ -139,15 +135,15 @@ func (h *Handler) flush() {
 		return
 	}
 
-	if h.natsConn != nil {
-		if err := h.natsConn.Publish(h.subject, data); err != nil {
+	if l.natsConn != nil {
+		if err := l.natsConn.Publish(l.subject, data); err != nil {
 			slog.Warn("Failed to publish to NATS, relying on internal queuing", "error", err)
 		}
 	}
 }
 
-func (h *Handler) connect() error {
-	natsConn, err := nats.Connect(h.natsURL,
+func (l *Logistiq) connect() error {
+	natsConn, err := nats.Connect(l.natsURL,
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(5*time.Second),
 		nats.ReconnectBufSize(32*1024*1024),
@@ -165,21 +161,21 @@ func (h *Handler) connect() error {
 		return err
 	}
 
-	h.mutex.Lock()
-	h.natsConn = natsConn
-	h.mutex.Unlock()
+	l.mutex.Lock()
+	l.natsConn = natsConn
+	l.mutex.Unlock()
 
 	return nil
 }
 
-func (h *Handler) startConnection() {
-	defer h.waitGroup.Done()
+func (l *Logistiq) startConnection() {
+	defer l.waitGroup.Done()
 
 	for {
-		if err := h.connect(); err != nil {
+		if err := l.connect(); err != nil {
 			slog.Warn("NATS connection attempt failed, retrying", "error", err)
 			select {
-			case <-h.stop:
+			case <-l.stop:
 				return
 			case <-time.After(5 * time.Second):
 				continue
@@ -189,40 +185,40 @@ func (h *Handler) startConnection() {
 	}
 }
 
-func (h *Handler) worker() {
-	defer h.waitGroup.Done()
-	ticker := time.NewTicker(h.timeout)
+func (l *Logistiq) worker() {
+	defer l.waitGroup.Done()
+	ticker := time.NewTicker(l.timeout)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-h.stop:
-			h.flush()
+		case <-l.stop:
+			l.flush()
 			return
 		case <-ticker.C:
-			h.flush()
-		case <-h.notifyWork:
-			h.flush()
+			l.flush()
+		case <-l.notifyWork:
+			l.flush()
 		}
 	}
 }
 
-func (h *Handler) Close() error {
-	h.mutex.Lock()
-	if h.closed {
-		h.mutex.Unlock()
+func (l *Logistiq) Close() error {
+	l.mutex.Lock()
+	if l.closed {
+		l.mutex.Unlock()
 		return nil
 	}
-	h.closed = true
-	h.mutex.Unlock()
+	l.closed = true
+	l.mutex.Unlock()
 
-	close(h.stop)
-	h.waitGroup.Wait()
+	close(l.stop)
+	l.waitGroup.Wait()
 
-	if h.natsConn != nil {
-		flushErr := h.natsConn.FlushTimeout(10 * time.Second)
-		h.natsConn.Close()
-		h.natsConn = nil
+	if l.natsConn != nil {
+		flushErr := l.natsConn.FlushTimeout(10 * time.Second)
+		l.natsConn.Close()
+		l.natsConn = nil
 		if flushErr != nil {
 			slog.Warn("Failed to flush NATS buffer on close", "error", flushErr)
 			return flushErr

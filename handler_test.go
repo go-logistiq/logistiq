@@ -18,53 +18,49 @@ const (
 	testSubject = "logs.test.app1"
 )
 
-func waitForConnection(t *testing.T, h *Handler, timeout time.Duration) {
+func waitForConnection(t *testing.T, l *Logistiq, timeout time.Duration) {
 	t.Helper()
 	start := time.Now()
 	for {
 		if time.Since(start) >= timeout {
 			t.Skipf("Skipping test: timeout waiting for NATS connection at %s", natsURL)
 		}
-		h.mutex.Lock()
-		if h.natsConn != nil && h.natsConn.IsConnected() {
-			h.mutex.Unlock()
+		l.mutex.Lock()
+		if l.natsConn != nil && l.natsConn.IsConnected() {
+			l.mutex.Unlock()
 			return
 		}
-		h.mutex.Unlock()
+		l.mutex.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-func TestHandler_New(t *testing.T) {
-	var handlerSet bool
-	setHandler := func(slog.Handler) {
-		handlerSet = true
-	}
-
+func TestLogistiq_New(t *testing.T) {
 	opts := Options{
-		Level:      slog.LevelInfo,
-		BatchSize:  10,
-		Timeout:    100 * time.Millisecond,
-		NATSURL:    natsURL,
-		Subject:    testSubject,
-		SetHandler: setHandler,
+		Level:     slog.LevelInfo,
+		BatchSize: 10,
+		Timeout:   100 * time.Millisecond,
+		NATSURL:   natsURL,
+		Subject:   testSubject,
 	}
 
-	h := New(opts)
-	defer h.Close()
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	waitForConnection(t, l, 5*time.Second)
 
-	assert.NotNil(t, h, "Handler should be created")
-	assert.Equal(t, opts.Level, h.level, "Level should match")
-	assert.Equal(t, opts.BatchSize, h.batchSize, "BatchSize should match")
-	assert.Equal(t, opts.Timeout, h.timeout, "Timeout should match")
-	assert.Equal(t, opts.Subject, h.subject, "Subject should match")
-	assert.NotNil(t, h.natsConn, "NATS connection should be initialized")
-	assert.True(t, handlerSet, "SetHandler should have been called")
+	assert.NotNil(t, l, "Logistiq should be created")
+	assert.NotNil(t, l.Handler, "Handler should be set")
+	assert.Equal(t, l, l.Handler, "Handler should be the Logistiq instance")
+	assert.Equal(t, opts.Level, l.level, "Level should match")
+	assert.Equal(t, opts.BatchSize, l.batchSize, "BatchSize should match")
+	assert.Equal(t, opts.Timeout, l.timeout, "Timeout should match")
+	assert.Equal(t, opts.Subject, l.subject, "Subject should match")
+	assert.NotNil(t, l.natsConn, "NATS connection should be initialized")
 }
 
-func TestHandler_Enabled(t *testing.T) {
+func TestLogistiq_Enabled(t *testing.T) {
 	opts := Options{
 		Level:     slog.LevelWarn,
 		BatchSize: 10,
@@ -72,17 +68,19 @@ func TestHandler_Enabled(t *testing.T) {
 		NATSURL:   natsURL,
 		Subject:   testSubject,
 	}
-	h := New(opts)
-	defer h.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
 
-	assert.False(t, h.Enabled(context.Background(), slog.LevelInfo), "Info should be disabled")
-	assert.True(t, h.Enabled(context.Background(), slog.LevelWarn), "Warn should be enabled")
-	assert.True(t, h.Enabled(context.Background(), slog.LevelError), "Error should be enabled")
+	waitForConnection(t, l, 5*time.Second)
+
+	assert.False(t, l.Handler.Enabled(context.Background(), slog.LevelInfo), "Info should be disabled")
+	assert.True(t, l.Handler.Enabled(context.Background(), slog.LevelWarn), "Warn should be enabled")
+	assert.True(t, l.Handler.Enabled(context.Background(), slog.LevelError), "Error should be enabled")
 }
 
-func TestHandler_HandleAndFlush_BatchSize(t *testing.T) {
+func TestLogistiq_HandleAndFlush_BatchSize(t *testing.T) {
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		t.Skipf("Skipping test: failed to connect to NATS at %s: %v", natsURL, err)
@@ -96,10 +94,12 @@ func TestHandler_HandleAndFlush_BatchSize(t *testing.T) {
 		NATSURL:   natsURL,
 		Subject:   testSubject,
 	}
-	h := New(opts)
-	defer h.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
+
+	waitForConnection(t, l, 5*time.Second)
 
 	var received []logRecord
 	var mu sync.Mutex
@@ -113,13 +113,13 @@ func TestHandler_HandleAndFlush_BatchSize(t *testing.T) {
 	})
 	require.NoError(t, err, "Failed to subscribe to NATS")
 
-	err = h.Handle(context.Background(), slog.Record{
+	err = l.Handler.Handle(context.Background(), slog.Record{
 		Time:    time.Now(),
 		Message: "Test message 1",
 		Level:   slog.LevelInfo,
 	})
 	require.NoError(t, err)
-	err = h.Handle(context.Background(), slog.Record{
+	err = l.Handler.Handle(context.Background(), slog.Record{
 		Time:    time.Now(),
 		Message: "Test message 2",
 		Level:   slog.LevelWarn,
@@ -139,7 +139,7 @@ func TestHandler_HandleAndFlush_BatchSize(t *testing.T) {
 	}
 }
 
-func TestHandler_HandleAndFlush_Timeout(t *testing.T) {
+func TestLogistiq_HandleAndFlush_Timeout(t *testing.T) {
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		t.Skipf("Skipping test: failed to connect to NATS at %s: %v", natsURL, err)
@@ -153,10 +153,12 @@ func TestHandler_HandleAndFlush_Timeout(t *testing.T) {
 		NATSURL:   natsURL,
 		Subject:   testSubject,
 	}
-	h := New(opts)
-	defer h.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
+
+	waitForConnection(t, l, 5*time.Second)
 
 	var received []logRecord
 	var mu sync.Mutex
@@ -170,7 +172,7 @@ func TestHandler_HandleAndFlush_Timeout(t *testing.T) {
 	})
 	require.NoError(t, err, "Failed to subscribe to NATS")
 
-	err = h.Handle(context.Background(), slog.Record{
+	err = l.Handler.Handle(context.Background(), slog.Record{
 		Time:    time.Now(),
 		Message: "Test message",
 		Level:   slog.LevelInfo,
@@ -188,7 +190,7 @@ func TestHandler_HandleAndFlush_Timeout(t *testing.T) {
 	}
 }
 
-func TestHandler_HandleWithAttributes(t *testing.T) {
+func TestLogistiq_HandleWithAttributes(t *testing.T) {
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		t.Skipf("Skipping test: failed to connect to NATS at %s: %v", natsURL, err)
@@ -202,10 +204,12 @@ func TestHandler_HandleWithAttributes(t *testing.T) {
 		NATSURL:   natsURL,
 		Subject:   testSubject,
 	}
-	h := New(opts)
-	defer h.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
+
+	waitForConnection(t, l, 5*time.Second)
 
 	var received []logRecord
 	var mu sync.Mutex
@@ -222,7 +226,7 @@ func TestHandler_HandleWithAttributes(t *testing.T) {
 	r := slog.NewRecord(time.Now(), slog.LevelInfo, "Test with attrs", 0)
 	r.AddAttrs(slog.String("key", "value"), slog.Int("number", 42))
 
-	err = h.Handle(context.Background(), r)
+	err = l.Handler.Handle(context.Background(), r)
 	require.NoError(t, err)
 
 	time.Sleep(300 * time.Millisecond)
@@ -238,7 +242,7 @@ func TestHandler_HandleWithAttributes(t *testing.T) {
 	}
 }
 
-func TestHandler_Close(t *testing.T) {
+func TestLogistiq_Close(t *testing.T) {
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		t.Skipf("Skipping test: failed to connect to NATS at %s: %v", natsURL, err)
@@ -252,10 +256,12 @@ func TestHandler_Close(t *testing.T) {
 		NATSURL:   natsURL,
 		Subject:   testSubject,
 	}
-	h := New(opts)
-	defer h.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
+
+	waitForConnection(t, l, 5*time.Second)
 
 	var received []logRecord
 	var mu sync.Mutex
@@ -269,14 +275,15 @@ func TestHandler_Close(t *testing.T) {
 	})
 	require.NoError(t, err, "Failed to subscribe to NATS")
 
-	err = h.Handle(context.Background(), slog.Record{
+	err = l.Handler.Handle(context.Background(), slog.Record{
 		Time:    time.Now(),
 		Message: "Test before close",
 		Level:   slog.LevelInfo,
 	})
 	require.NoError(t, err)
 
-	time.Sleep(300 * time.Millisecond)
+	err = l.Close()
+	require.NoError(t, err, "Close should not return an error")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -286,7 +293,7 @@ func TestHandler_Close(t *testing.T) {
 	}
 }
 
-func TestHandler_QueueLimit(t *testing.T) {
+func TestLogistiq_QueueLimit(t *testing.T) {
 	opts := Options{
 		Level:     slog.LevelInfo,
 		BatchSize: 1000,
@@ -294,13 +301,15 @@ func TestHandler_QueueLimit(t *testing.T) {
 		NATSURL:   natsURL,
 		Subject:   testSubject,
 	}
-	h := New(opts)
-	defer h.Close()
 
-	waitForConnection(t, h, 5*time.Second)
+	l, err := New(opts)
+	require.NoError(t, err, "New should not return an error")
+	defer l.Close()
+
+	waitForConnection(t, l, 5*time.Second)
 
 	for i := 0; i < 1001; i++ {
-		err := h.Handle(context.Background(), slog.Record{
+		err := l.Handler.Handle(context.Background(), slog.Record{
 			Time:    time.Now(),
 			Message: "Test message",
 			Level:   slog.LevelInfo,
@@ -310,7 +319,7 @@ func TestHandler_QueueLimit(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	assert.LessOrEqual(t, len(h.queue), 1000, "Queue should not exceed 1000 entries")
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	assert.LessOrEqual(t, len(l.queue), 1000, "Queue should not exceed 1000 entries")
 }
