@@ -1,4 +1,4 @@
-package handler
+package logistiq
 
 import (
 	"context"
@@ -17,8 +17,7 @@ type logRecord struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-type Logistiq struct {
-	Handler    slog.Handler
+type LogistiqHandler struct {
 	level      slog.Level
 	queue      []slog.Record
 	mutex      sync.Mutex
@@ -41,7 +40,7 @@ type Options struct {
 	Subject   string
 }
 
-func New(opts Options) (*Logistiq, error) {
+func NewLogistiqHandler(opts Options) (*LogistiqHandler, error) {
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 100
 	}
@@ -49,7 +48,7 @@ func New(opts Options) (*Logistiq, error) {
 		opts.Timeout = 5 * time.Second
 	}
 
-	l := &Logistiq{
+	l := &LogistiqHandler{
 		level:      opts.Level,
 		queue:      make([]slog.Record, 0, opts.BatchSize),
 		batchSize:  opts.BatchSize,
@@ -60,8 +59,6 @@ func New(opts Options) (*Logistiq, error) {
 		notifyWork: make(chan struct{}, 1),
 	}
 
-	l.Handler = l
-
 	l.waitGroup.Add(1)
 	go l.startConnection()
 
@@ -71,11 +68,11 @@ func New(opts Options) (*Logistiq, error) {
 	return l, nil
 }
 
-func (l *Logistiq) Enabled(_ context.Context, level slog.Level) bool {
+func (l *LogistiqHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= l.level
 }
 
-func (l *Logistiq) Handle(_ context.Context, r slog.Record) error {
+func (l *LogistiqHandler) Handle(_ context.Context, r slog.Record) error {
 	l.mutex.Lock()
 	if len(l.queue) >= 1000 {
 		slog.Warn("Queue full, dropping oldest log")
@@ -95,15 +92,15 @@ func (l *Logistiq) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-func (l *Logistiq) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (l *LogistiqHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return l
 }
 
-func (l *Logistiq) WithGroup(name string) slog.Handler {
+func (l *LogistiqHandler) WithGroup(name string) slog.Handler {
 	return l
 }
 
-func (l *Logistiq) flush() {
+func (l *LogistiqHandler) flush() {
 	l.mutex.Lock()
 	if len(l.queue) == 0 {
 		l.mutex.Unlock()
@@ -142,7 +139,7 @@ func (l *Logistiq) flush() {
 	}
 }
 
-func (l *Logistiq) connect() error {
+func (l *LogistiqHandler) connect() error {
 	natsConn, err := nats.Connect(l.natsURL,
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(5*time.Second),
@@ -168,7 +165,7 @@ func (l *Logistiq) connect() error {
 	return nil
 }
 
-func (l *Logistiq) startConnection() {
+func (l *LogistiqHandler) startConnection() {
 	defer l.waitGroup.Done()
 
 	for {
@@ -185,7 +182,7 @@ func (l *Logistiq) startConnection() {
 	}
 }
 
-func (l *Logistiq) worker() {
+func (l *LogistiqHandler) worker() {
 	defer l.waitGroup.Done()
 	ticker := time.NewTicker(l.timeout)
 	defer ticker.Stop()
@@ -203,7 +200,7 @@ func (l *Logistiq) worker() {
 	}
 }
 
-func (l *Logistiq) Close() error {
+func (l *LogistiqHandler) Close() error {
 	l.mutex.Lock()
 	if l.closed {
 		l.mutex.Unlock()

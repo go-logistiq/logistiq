@@ -1,4 +1,4 @@
-module github.com/go-logistiq/handler
+module github.com/go-logistiq/logistiq
 
 go 1.24.1
 
