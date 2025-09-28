@@ -3,7 +3,7 @@ module github.com/go-logistiq/logistiq
 go 1.24.1
 
 require (
-	github.com/nats-io/nats.go v1.45.0
+	github.com/nats-io/nats.go v1.46.0
 	github.com/stretchr/testify v1.10.0
 )
 
